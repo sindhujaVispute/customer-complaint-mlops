@@ -1,0 +1,78 @@
+version: '3.8'
+
+services:
+  # Training service
+  train:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: customer-complaint-train
+    volumes:
+      - ./artifacts:/app/artifacts
+      - ./mlruns:/app/mlruns
+      - ./cache:/app/cache
+    command: train.py
+    environment:
+      - MLFLOW_TRACKING_URI=file:/app/mlruns
+    profiles:
+      - train
+
+  # Evaluation service
+  evaluate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: customer-complaint-evaluate
+    volumes:
+      - ./artifacts:/app/artifacts
+      - ./mlruns:/app/mlruns
+    command: evaluate.py
+    environment:
+      - MLFLOW_TRACKING_URI=file:/app/mlruns
+    profiles:
+      - evaluate
+
+  # Prediction API service
+  predict-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: customer-complaint-api
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./artifacts:/app/artifacts
+    environment:
+      - MODEL_PATH=/app/artifacts/final_model
+    profiles:
+      - api
+
+  # MLflow UI service
+  mlflow-ui:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mlflow-ui
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./mlruns:/app/mlruns
+    command: -c "mlflow ui --host 0.0.0.0 --port 5000 --backend-store-uri file:/app/mlruns"
+    profiles:
+      - mlflow
+
+  # Jupyter development environment
+  jupyter:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: jupyter-lab
+    ports:
+      - "8888:8888"
+    volumes:
+      - .:/app
+      - ./artifacts:/app/artifacts
+      - ./mlruns:/app/mlruns
+    command: jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root --NotebookApp.token=''
+    profiles:
+      - dev
