@@ -173,7 +173,7 @@ def train():
         output_dir="./results",
         eval_strategy="epoch",
         save_strategy="epoch",
-        learning_rate=2e-5,
+        learning_rate=3e-5,
         per_device_train_batch_size=8,
         per_device_eval_batch_size=8,
         num_train_epochs=3,
@@ -301,7 +301,7 @@ def train():
                 f.write(f"{key}: {value}\n")
         mlflow.log_artifact(config_path)
         
-        print(f"\n✅ Training complete! MLflow run ID: {run.info.run_id}")
+        print(f"\n Training complete! MLflow run ID: {run.info.run_id}")
         print(f"   Run name: {run.info.run_name}")
         print("\nTo view MLflow UI, run:")
         print("  mlflow ui")
