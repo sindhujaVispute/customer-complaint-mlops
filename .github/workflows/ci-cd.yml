@@ -6,18 +6,39 @@ on:
   pull_request:
     branches: [ main, master ]
   workflow_dispatch:
+    inputs:
+      run_training:
+        description: '🔬 Run MLflow Training? (5-10 mins)'
+        type: boolean
+        default: false
+      learning_rate:
+        description: 'Learning Rate'
+        type: string
+        default: '3e-5'
+      batch_size:
+        description: 'Batch Size'
+        type: string
+        default: '16'
+      epochs:
+        description: 'Epochs'
+        type: string
+        default: '3'
+      run_name:
+        description: 'Custom run name (optional)'
+        type: string
+        default: ''
   release:
     types: [published]
 
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: sindhujavispute/customer-complaint-mlops
-  MLFLOW_TRACKING_URI: sqlite:///mlflow.db  # ← Changed to SQLite
-  MLFLOW_ALLOW_FILE_STORE: "true"           # ← Allow file store fallback
+  MLFLOW_TRACKING_URI: sqlite:///mlflow.db
+  MLFLOW_ALLOW_FILE_STORE: "true"
 
 jobs:
   # ============================================================
-  # 1. CODE QUALITY
+  # 1. CODE QUALITY (Always runs)
   # ============================================================
   code-quality:
     runs-on: ubuntu-latest
@@ -34,7 +55,7 @@ jobs:
           black --check --diff *.py || true
 
   # ============================================================
-  # 2. DATASET VALIDATION
+  # 2. DATASET VALIDATION (Always runs)
   # ============================================================
   dataset-validation:
     runs-on: ubuntu-latest
@@ -57,7 +78,7 @@ jobs:
           "
 
   # ============================================================
-  # 3. UNIT TESTS
+  # 3. UNIT TESTS (Always runs)
   # ============================================================
   unit-tests:
     runs-on: ubuntu-latest
@@ -74,12 +95,13 @@ jobs:
           pytest test_pipeline.py -v || true
 
   # ============================================================
-  # 4. MLFLOW EXPERIMENT (FIXED!)
+  # 4. MLFLOW EXPERIMENT (RUNS ONLY WHEN MANUALLY TRIGGERED OR RELEASE!)
   # ============================================================
   mlflow-experiment:
     runs-on: ubuntu-latest
     needs: [unit-tests]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    #  ONLY runs on manual trigger OR release
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'release'
     steps:
       - uses: actions/checkout@v4
       
@@ -95,78 +117,96 @@ jobs:
       
       - name: Run MLflow experiment
         run: |
-          echo " Running MLflow experiment..."
-          # Set tracking URI explicitly
+          echo "Running MLflow experiment..."
           export MLFLOW_TRACKING_URI=sqlite:///mlflow.db
           export MLFLOW_ALLOW_FILE_STORE=true
-          python train.py --learning_rate 3e-5 --batch_size 16 --epochs 3
+          
+          LR=${{ inputs.learning_rate || '3e-5' }}
+          BATCH=${{ inputs.batch_size || '16' }}
+          EPOCHS=${{ inputs.epochs || '3' }}
+          NAME=${{ inputs.run_name || '' }}
+          
+          echo "Parameters: LR=$LR, Batch=$BATCH, Epochs=$EPOCHS"
+          
+          if [ -n "$NAME" ]; then
+            python train.py --learning_rate $LR --batch_size $BATCH --epochs $EPOCHS --run_name "$NAME"
+          else
+            python train.py --learning_rate $LR --batch_size $BATCH --epochs $EPOCHS
+          fi
       
-      - name: Display MLflow results
-        run: |
-          echo " MLflow Results:"
-          echo "-------------------"
-          export MLFLOW_TRACKING_URI=sqlite:///mlflow.db
-          mlflow runs list --experiment-id 1 --max-results 1 || true
-      
-      - name: Upload MLflow logs as artifact
+      - name: Upload MLflow logs
         uses: actions/upload-artifact@v4
         with:
-          name: mlflow-logs
+          name: mlflow-logs-${{ github.run_id }}
           path: ./mlruns/
-          retention-days: 30
+          retention-days: 90
 
   # ============================================================
-  # 5. MLFLOW MODEL REGISTRY (FIXED!)
+  # 5. MLFLOW MODEL REGISTRY (ONLY if experiment ran successfully)
   # ============================================================
   model-registry:
     runs-on: ubuntu-latest
     needs: [mlflow-experiment]
-    if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: success() && (github.event_name == 'workflow_dispatch' || github.event_name == 'release')
     steps:
       - uses: actions/checkout@v4
       
       - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-          cache: 'pip'
       
       - name: Install MLflow
-        run: |
-          pip install mlflow
+        run: pip install mlflow
       
       - name: Download MLflow logs
         uses: actions/download-artifact@v4
         with:
-          name: mlflow-logs
+          name: mlflow-logs-${{ github.run_id }}
           path: ./mlruns/
       
-      - name: Register best model in MLflow Registry
+      - name: Register model in MLflow Registry
         run: |
-          echo " Registering model in MLflow Model Registry..."
+          echo "Registering model in MLflow Model Registry..."
           export MLFLOW_TRACKING_URI=sqlite:///mlflow.db
           export MLFLOW_ALLOW_FILE_STORE=true
           
-          # Get the latest run ID
+          # Get all runs sorted by start time
           RUN_ID=$(mlflow runs list --experiment-id 1 --max-results 1 | tail -1 | awk '{print $1}')
           echo "Latest run ID: $RUN_ID"
           
           if [ -n "$RUN_ID" ]; then
-            # Register the model
+            # Get run metrics
+            ACCURACY=$(mlflow runs get --run-id $RUN_ID | grep "eval_accuracy" | tail -1 | awk '{print $3}')
+            echo "Model Accuracy: $ACCURACY"
+            
+            # Register the model (this creates a new version automatically)
             mlflow models register --experiment-run-id $RUN_ID --name "customer-complaint-classifier" || true
             
+            # Get the new version number
+            VERSION=$(mlflow models list-versions --name "customer-complaint-classifier" | head -1 | awk '{print $2}')
+            echo " Model version: $VERSION"
+            
             # Transition to Staging
-            mlflow models transition --name "customer-complaint-classifier" --version 1 --stage Staging || true
-            echo "✅ Model registered and set to Staging!"
+            mlflow models transition --name "customer-complaint-classifier" --version $VERSION --stage Staging || true
+            
+            echo "✅ Model registered as version $VERSION with accuracy $ACCURACY"
+            
+            # Create a summary
+            echo "##  Model Registry Summary" >> $GITHUB_STEP_SUMMARY
+            echo "| Version | Stage | Accuracy | Run ID |" >> $GITHUB_STEP_SUMMARY
+            echo "|---------|-------|----------|--------|" >> $GITHUB_STEP_SUMMARY
+            echo "| $VERSION | Staging | $ACCURACY | $RUN_ID |" >> $GITHUB_STEP_SUMMARY
           else
-            echo "⚠️ No runs found, skipping model registration"
+            echo " No runs found, skipping model registration"
           fi
 
   # ============================================================
-  # 6. DOCKER BUILD AND TEST
+  # 6. DOCKER BUILD (Always runs on main)
   # ============================================================
   docker-build-test:
     runs-on: ubuntu-latest
     needs: [unit-tests]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
@@ -180,7 +220,7 @@ jobs:
       - run: docker run --rm ${{ env.IMAGE_NAME }}:test --help
 
   # ============================================================
-  # 7. DOCKER PUSH (Main Image)
+  # 7. DOCKER PUSH (Only on main, after tests pass)
   # ============================================================
   docker-push:
     runs-on: ubuntu-latest
@@ -213,7 +253,7 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
 
   # ============================================================
-  # 8. DOCKER PUSH (API Image)
+  # 8. DOCKER API PUSH (Only on main)
   # ============================================================
   docker-api-push:
     runs-on: ubuntu-latest
@@ -244,21 +284,3 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-
-  # ============================================================
-  # 9. NOTIFICATION
-  # ============================================================
-  notify-complete:
-    runs-on: ubuntu-latest
-    needs: [docker-push, docker-api-push]
-    if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main'
-    steps:
-      - run: |
-          echo " CI/CD Pipeline Completed Successfully!"
-          echo "========================================="
-          echo " Code Quality Checks: Passed"
-          echo " Dataset Validation: Passed"
-          echo " Unit Tests: Passed"
-          echo " MLflow Experiment: Completed"
-          echo " Model Registry: Updated"
-          echo "Docker Images: Built and Pushed"
