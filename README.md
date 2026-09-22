@@ -27,6 +27,53 @@ Automatically classify customer complaints into three categories:
 - **CPU only** (No GPU required)
 - 8GB+ RAM recommended
 - 2GB+ free disk space
+## Technical Architecture
+
+## Architecture
+flowchart TB
+    subgraph Data["Data Layer"]
+        DS["Hugging Face Dataset<br/>hblim/customer-complaints<br/>1261 train / 210 val / 211 test"]
+    end
+    subgraph ML["ML Pipeline"]
+        TK["Tokenizer<br/>DistilBERT"]
+        MD["Model<br/>DistilBERT + 3-class head"]
+        TR["Trainer<br/>Hugging Face"]
+        EV["Evaluation<br/>scikit-learn"]
+    end
+    subgraph MLOps["MLOps Layer"]
+        MF["MLflow Tracking"]
+        MR["MLflow Model Registry"]
+    end
+    subgraph App["Application Layer"]
+        T["train.py"]
+        E["evaluate.py"]
+        P["predict.py"]
+        A["api.py / FastAPI"]
+        TS["test_pipeline.py"]
+    end
+    subgraph Deploy["Deployment Layer"]
+        DK["Dockerfile"]
+        DKA["Dockerfile.api"]
+        GHCR["GHCR"]
+        GHA["GitHub Actions"]
+    end
+    DS --> TK
+    TK --> MD
+    MD --> TR
+    TR --> EV
+    EV --> MF
+    TR --> MF
+    MF --> MR
+    T --> TR
+    E --> MD
+    P --> MD
+    A --> MD
+    TS --> T
+    T --> DK
+    A --> DKA
+    DK --> GHCR
+    DKA --> GHCR
+    GHA --> GHCR
 
 ## Installation
 
